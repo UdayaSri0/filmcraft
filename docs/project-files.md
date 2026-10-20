@@ -85,18 +85,32 @@ A file with a `schema_version` newer than the build supports is **refused**, not
 
 Reading it partially and saving it back would silently drop whatever the newer version added.
 
-## Saving is atomic
+## Saving and live project state
 
-Every write of a project file, auto-save, recovery snapshot or preferences file goes through
-`filmcraft_format::atomic_write`:
+Save and Save As stage destination-based project and root-bin names until the write succeeds.
+If a schema-backup or target write fails, the live project, adopted path, dirty state and edit
+history stay unchanged. The serialized successful save and adopted project use the same new name.
+Save a Copy keeps the current name and path. A protective legacy backup that was successfully
+written before a later target failure remains available; saving is not a multi-file rollback.
 
-1. write the bytes to a hidden temp file in the **same directory** (`.<name>.<pid>-<n>.tmp`);
-2. `fsync` the temp file;
-3. rename it over the target (an atomic replace on every supported OS);
-4. `fsync` the directory so the rename itself is durable.
+Generated command regressions: `cargo test --release -p filmcraft-engine --lib save_transaction_`.
+These injected-write tests check live-session state, not native disk-failure cleanup or power-loss
+recovery.
 
-A crash, `kill -9` or power cut at any point leaves either the complete old file or the complete new
-one. If a step fails, the temp file is removed and the old file is untouched.
+The native filesystem host has two write paths:
+
+- Replacement writes (`FsServices::write_file`) and the auto-save, recovery and preferences
+  writers use `filmcraft_format::atomic_write`: write a hidden temporary file in the same directory,
+  sync its contents, rename it over the target, then attempt to sync the directory. If a write,
+  sync or rename fails before replacement completes, cleanup of the temporary file is attempted
+  and the target is not replaced. Directory syncing is best effort; successful return does not
+  certify power-loss durability.
+- New destinations (`FsServices::write_file_new`) use exclusive creation to avoid replacing a
+  concurrently created file, then write and sync the contents. On a write or sync error the host
+  attempts to truncate and sync the reserved file. An empty or incomplete destination may remain;
+  this path does not use atomic replacement.
+
+These file-level limits are separate from adopting a successful save into the live session.
 
 ## Commands
 
@@ -136,6 +150,13 @@ unsaved project uses `<data dir>/Auto-Save/`. After each write the oldest copies
 deleted. Only files named exactly `<name>-<timestamp>.fcproj` are ever deleted. An auto-save is an
 ordinary project file: open it with File ▸ Open Project. `file.listAutoSaves` lists them, newest
 first.
+
+Project Settings ▸ Scratch Disks can send auto-saves (Project Auto Save), render previews (Video
+Previews), captured and generated media (Captured Audio and Video, also the default for proxies)
+and audio previews to another folder. A folder named in a project file is used only when it is
+inside the project's own folder or was chosen in Scratch Disks on this computer (remembered in
+`autoSave.scratchFolders`). Otherwise FilmCraft uses the default location and says so when the
+project opens. Folders on another computer or a device are never used.
 
 Preferences are stored in `<data dir>/preferences.json`. The `prefs.*` commands read and change them.
 
@@ -268,6 +289,12 @@ have no identity, so relinking them skips the fingerprint check.
   deleted only with `deleteFiles: true`.
 - The media pool caches sources per item **and** per reference (path, offline flag). So relinking,
   Make Offline and undoing either take effect on the next frame.
+- **Stored paths.** Media and proxy paths read from a document (the project file, a project
+  template, an interchange file) are opened only when they name a file on this computer or on
+  the network share the document itself is on (`crates/engine/src/doc_path.rs`, built on
+  `craft-docpath`); a relative path is taken from the document's folder. Other paths (another
+  computer, a device) count as missing: the item shows the offline slate, the open says why, and
+  the Link Media dialog lists it. A file imported or linked in this session is opened as given.
 
 ### Link Media
 
